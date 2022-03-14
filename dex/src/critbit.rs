@@ -2,6 +2,7 @@ use crate::{
     error::{DexErrorCode, DexResult},
     fees::FeeTier,
 };
+
 use arrayref::{array_refs, mut_array_refs};
 use bytemuck::{cast, cast_mut, cast_ref, cast_slice, cast_slice_mut, Pod, Zeroable};
 use num_enum::{IntoPrimitive, TryFromPrimitive};
@@ -742,10 +743,7 @@ impl Slab {
         if let Some(r) = self.root() {
             walk_rec(self, r, &mut buf);
         }
-        if buf.len() != buf.capacity() {
-            self.hexdump();
-        }
-        assert_eq!(buf.len(), buf.capacity());
+
         buf
     }
 
@@ -773,21 +771,11 @@ impl Slab {
         if let Some(r) = self.root() {
             walk_rec(self, r, &mut buf);
         }
-        if buf.len() != buf.capacity() {
-            self.hexdump();
-        }
-        assert_eq!(buf.len(), buf.capacity());
+
         buf
     }
 
-    pub fn hexdump(&self) {
-        println!("Header:");
-        hexdump::hexdump(bytemuck::bytes_of(self.header()));
-        println!("Data:");
-        hexdump::hexdump(cast_slice(self.nodes()));
-    }
 
-    
     pub fn check_invariants(&self) {
         // first check the live tree contents
         let mut count = 0;
@@ -846,183 +834,6 @@ impl Slab {
             let typed_ref: &FreeNode = cast_ref(contents);
             next_free_node = typed_ref.next;
             free_nodes_remaining -= 1;
-        }
-    }
-}
-
-
-mod tests {
-    use super::*;
-    use bytemuck::bytes_of;
-    use rand::prelude::*;
-
-    #[test]
-    fn simulate_find_min() {
-        use std::collections::BTreeMap;
-
-        for trial in 0..10u64 {
-            let mut aligned_buf = vec![0u64; 10_000];
-            let bytes: &mut [u8] = cast_slice_mut(aligned_buf.as_mut_slice());
-
-            let slab: &mut Slab = Slab::new(bytes);
-            let mut model: BTreeMap<u128, LeafNode> = BTreeMap::new();
-
-            let mut all_keys = vec![];
-
-            let mut rng = StdRng::seed_from_u64(trial);
-
-            assert_eq!(slab.find_min(), None);
-            assert_eq!(slab.find_max(), None);
-
-            for i in 0..100 {
-                let offset = rng.gen();
-                let key = rng.gen();
-                let owner = rng.gen();
-                let qty = rng.gen();
-                let leaf = LeafNode::new(offset, key, owner, qty, FeeTier::Base, 0);
-
-                println!("{:x}", key);
-                println!("{}", i);
-
-                slab.insert_leaf(&leaf).unwrap();
-                model.insert(key, leaf).ok_or(()).unwrap_err();
-                all_keys.push(key);
-
-                // test find_by_key
-                let valid_search_key = *all_keys.choose(&mut rng).unwrap();
-                let invalid_search_key = rng.gen();
-
-                for &search_key in &[valid_search_key, invalid_search_key] {
-                    let slab_value = slab
-                        .find_by_key(search_key)
-                        .map(|x| slab.get(x))
-                        .flatten()
-                        .map(bytes_of);
-                    let model_value = model.get(&search_key).map(bytes_of);
-                    assert_eq!(slab_value, model_value);
-                }
-
-                // test find_min
-                let slab_min = slab.get(slab.find_min().unwrap()).unwrap();
-                let model_min = model.iter().next().unwrap().1;
-                assert_eq!(bytes_of(slab_min), bytes_of(model_min));
-
-                // test find_max
-                let slab_max = slab.get(slab.find_max().unwrap()).unwrap();
-                let model_max = model.iter().next_back().unwrap().1;
-                assert_eq!(bytes_of(slab_max), bytes_of(model_max));
-            }
-        }
-    }
-
-    #[test]
-    fn simulate_operations() {
-        use rand::distributions::WeightedIndex;
-        use std::collections::BTreeMap;
-
-        let mut aligned_buf = vec![0u64; 1_250_000];
-        let bytes: &mut [u8] = &mut cast_slice_mut(aligned_buf.as_mut_slice());
-        let slab: &mut Slab = Slab::new(bytes);
-        let mut model: BTreeMap<u128, LeafNode> = BTreeMap::new();
-
-        let mut all_keys = vec![];
-        let mut rng = StdRng::seed_from_u64(0);
-
-        #[derive(Copy, Clone)]
-        enum Op {
-            InsertNew,
-            InsertDup,
-            Delete,
-            Min,
-            Max,
-            End,
-        }
-
-        for weights in &[
-            [
-                (Op::InsertNew, 2000),
-                (Op::InsertDup, 200),
-                (Op::Delete, 2210),
-                (Op::Min, 500),
-                (Op::Max, 500),
-                (Op::End, 1),
-            ],
-            [
-                (Op::InsertNew, 10),
-                (Op::InsertDup, 200),
-                (Op::Delete, 5210),
-                (Op::Min, 500),
-                (Op::Max, 500),
-                (Op::End, 1),
-            ],
-        ] {
-            let dist = WeightedIndex::new(weights.iter().map(|(_op, wt)| wt)).unwrap();
-
-            for i in 0..100_000 {
-                slab.check_invariants();
-                let model_state = model.values().collect::<Vec<_>>();
-                let slab_state = slab.traverse();
-                assert_eq!(model_state, slab_state);
-
-                match weights[dist.sample(&mut rng)].0 {
-                    op @ Op::InsertNew | op @ Op::InsertDup => {
-                        let offset = rng.gen();
-                        let key = match op {
-                            Op::InsertNew => rng.gen(),
-                            Op::InsertDup => *all_keys.choose(&mut rng).unwrap(),
-                            _ => unreachable!(),
-                        };
-                        let owner = rng.gen();
-                        let qty = rng.gen();
-                        let leaf = LeafNode::new(offset, key, owner, qty, FeeTier::SRM5, 5);
-
-                        println!("Insert {:x}", key);
-
-                        all_keys.push(key);
-                        let slab_value = slab.insert_leaf(&leaf).unwrap().1;
-                        let model_value = model.insert(key, leaf);
-                        if slab_value != model_value {
-                            slab.hexdump();
-                        }
-                        assert_eq!(slab_value, model_value);
-                    }
-                    Op::Delete => {
-                        let key = all_keys
-                            .choose(&mut rng)
-                            .map(|x| *x)
-                            .unwrap_or_else(|| rng.gen());
-
-                        println!("Remove {:x}", key);
-
-                        let slab_value = slab.remove_by_key(key);
-                        let model_value = model.remove(&key);
-                        assert_eq!(slab_value.as_ref().map(cast_ref), model_value.as_ref());
-                    }
-                    Op::Min => {
-                        if model.len() == 0 {
-                            assert_eq!(identity(slab.header().leaf_count), 0);
-                        } else {
-                            let slab_min = slab.get(slab.find_min().unwrap()).unwrap();
-                            let model_min = model.iter().next().unwrap().1;
-                            assert_eq!(bytes_of(slab_min), bytes_of(model_min));
-                        }
-                    }
-                    Op::Max => {
-                        if model.len() == 0 {
-                            assert_eq!(identity(slab.header().leaf_count), 0);
-                        } else {
-                            let slab_max = slab.get(slab.find_max().unwrap()).unwrap();
-                            let model_max = model.iter().next_back().unwrap().1;
-                            assert_eq!(bytes_of(slab_max), bytes_of(model_max));
-                        }
-                    }
-                    Op::End => {
-                        if i > 10_000 {
-                            break;
-                        }
-                    }
-                }
-            }
         }
     }
 }
