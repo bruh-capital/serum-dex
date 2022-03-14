@@ -4,7 +4,6 @@ use crate::{
 };
 use arrayref::{array_refs, mut_array_refs};
 use bytemuck::{cast, cast_mut, cast_ref, cast_slice, cast_slice_mut, Pod, Zeroable};
-
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use static_assertions::const_assert_eq;
 use std::{
@@ -186,7 +185,7 @@ impl AnyNode {
         }
     }
 
-    #[cfg(test)]
+    
     pub fn prefix_len(&self) -> u32 {
         match self.case().unwrap() {
             NodeRef::Inner(&InnerNode { prefix_len, .. }) => prefix_len,
@@ -599,7 +598,7 @@ impl Slab {
         }
     }
 
-    #[cfg(test)]
+    
     pub fn find_by_key(&self, search_key: u128) -> Option<NodeHandle> {
         let mut node_handle: NodeHandle = self.root()?;
         loop {
@@ -726,7 +725,6 @@ impl Slab {
         self.remove_by_key(self.get(self.find_max()?)?.key()?)
     }
 
-    #[cfg(test)]
     pub fn traverse(&self) -> Vec<&LeafNode> {
         fn walk_rec<'a>(slab: &'a Slab, sub_root: NodeHandle, buf: &mut Vec<&'a LeafNode>) {
             match slab.get(sub_root).unwrap().case().unwrap() {
@@ -751,7 +749,37 @@ impl Slab {
         buf
     }
 
-    #[cfg(test)]
+    pub fn traverse_n(&self, target: usize) -> Vec<&LeafNode> {
+        fn walk_rec<'a>(slab: &'a Slab, sub_root: NodeHandle, buf: &mut Vec<&'a LeafNode>) {
+            if buf.len() == buf.capacity(){
+                return;
+            }
+            match slab.get(sub_root).unwrap().case().unwrap() {
+                NodeRef::Leaf(leaf) => {
+                    buf.push(leaf);
+                }
+                NodeRef::Inner(inner) => {
+                    walk_rec(slab, inner.children[0], buf);
+
+                    if buf.len() == buf.capacity(){return};
+
+                    walk_rec(slab, inner.children[1], buf);
+                }
+            }
+        }
+
+        let size = std::cmp::min(target as u64, self.header().leaf_count) as usize;
+        let mut buf = Vec::with_capacity(size);
+        if let Some(r) = self.root() {
+            walk_rec(self, r, &mut buf);
+        }
+        if buf.len() != buf.capacity() {
+            self.hexdump();
+        }
+        assert_eq!(buf.len(), buf.capacity());
+        buf
+    }
+
     pub fn hexdump(&self) {
         println!("Header:");
         hexdump::hexdump(bytemuck::bytes_of(self.header()));
@@ -759,7 +787,7 @@ impl Slab {
         hexdump::hexdump(cast_slice(self.nodes()));
     }
 
-    #[cfg(test)]
+    
     pub fn check_invariants(&self) {
         // first check the live tree contents
         let mut count = 0;
@@ -822,7 +850,7 @@ impl Slab {
     }
 }
 
-#[cfg(test)]
+
 mod tests {
     use super::*;
     use bytemuck::bytes_of;
